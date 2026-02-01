@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1.7
+#
+# Python Distroless Dockerfile (Maximum Security)
+# Features: No shell, no package manager, minimal attack surface
+#
+# Build args:
+#   PYTHON_VERSION - Python version (default: 3.12)
+#
+# Note: Distroless images have no shell - debugging requires ephemeral containers
+#
+# Usage:
+#   docker build -t myapp:latest .
+#   docker run --rm -p 8000:8000 myapp:latest
+
+# =============================================================================
+# Stage 1: Build environment
+# =============================================================================
+ARG PYTHON_VERSION=3.12
+
+FROM python:${PYTHON_VERSION}-slim AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install dependencies
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-compile -r requirements.txt
+
+# Copy application
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-compile .
+
+# =============================================================================
+# Stage 2: Distroless runtime (maximum security)
+# =============================================================================
+FROM gcr.io/distroless/python3-debian12 AS runtime
+
+WORKDIR /app
+
+# Copy virtual environment
+COPY --from=builder /opt/venv /opt/venv
+
+# Copy application
+COPY --from=builder /app /app
+
+# Set Python path to use venv
+ENV PYTHONPATH="/opt/venv/lib/python3.12/site-packages" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Distroless runs as nonroot by default (uid 65532)
+USER nonroot
+
+EXPOSE 8000
+
+# No ENTRYPOINT - distroless uses the image's default entrypoint
+CMD ["-m", "app.main"]
+
+# Note: HEALTHCHECK not supported in distroless (no shell)
+# Use Kubernetes probes or Docker healthcheck with exec form
+
+LABEL org.opencontainers.image.title="My Python App (Distroless)" \
+      org.opencontainers.image.description="Maximum security Python image"

@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.7
+#
+# Python Multi-Stage Dockerfile with pip (Traditional)
+# Features: Layer caching, minimal image, non-root, security hardened
+#
+# Build args:
+#   PYTHON_VERSION - Python version (default: 3.12)
+#
+# Usage:
+#   docker build -t myapp:latest .
+#   docker run --rm -p 8000:8000 myapp:latest
+
+# =============================================================================
+# Stage 1: Build environment
+# =============================================================================
+ARG PYTHON_VERSION=3.12
+
+FROM python:${PYTHON_VERSION}-slim AS builder
+
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install dependencies first (layer caching)
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-compile -r requirements.txt
+
+# Copy and install application
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-compile .
+
+# =============================================================================
+# Stage 2: Production runtime (minimal)
+# =============================================================================
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+# Security: Create non-root user
+RUN groupadd --gid 1000 appgroup && \
+    useradd --uid 1000 --gid 1000 --shell /bin/false --create-home appuser
+
+# Install runtime dependencies only
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /app
+
+# Copy virtual environment from builder
+COPY --from=builder --chown=appuser:appgroup /opt/venv /opt/venv
+
+# Copy application code (if not installed as package)
+COPY --from=builder --chown=appuser:appgroup /app /app
+
+# Set environment
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONFAULTHANDLER=1
+
+# Security: Switch to non-root user
+USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+EXPOSE 8000
+
+ENTRYPOINT ["tini", "--"]
+CMD ["python", "-m", "app.main"]
+
+# OCI Labels
+LABEL org.opencontainers.image.title="My Python App" \
+      org.opencontainers.image.description="Python application" \
+      org.opencontainers.image.version="1.0.0"

@@ -1,0 +1,103 @@
+# syntax=docker/dockerfile:1.7
+#
+# Python Multi-Stage Dockerfile with UV Package Manager
+# Features: Fast builds, minimal image, non-root, security hardened
+#
+# Build args:
+#   PYTHON_VERSION - Python version (default: 3.12)
+#   UV_VERSION     - UV package manager version (default: 0.5)
+#
+# Usage:
+#   docker build -t myapp:latest .
+#   docker run --rm -p 8000:8000 myapp:latest
+
+# =============================================================================
+# Stage 1: Build environment with UV
+# =============================================================================
+ARG PYTHON_VERSION=3.12
+ARG UV_VERSION=0.5
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+FROM python:${PYTHON_VERSION}-slim AS builder
+
+# Install UV from official image
+COPY --from=uv /uv /usr/local/bin/uv
+
+# Set UV environment variables for reproducible builds
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+WORKDIR /app
+
+# Install dependencies first (layer caching)
+# Copy only dependency files to maximize cache hits
+COPY pyproject.toml uv.lock* ./
+
+# Install dependencies into the virtual environment
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
+
+# Copy application source
+COPY . .
+
+# Install the project itself
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
+
+# =============================================================================
+# Stage 2: Production runtime (minimal)
+# =============================================================================
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+# Security: Create non-root user
+RUN groupadd --gid 1000 appgroup && \
+    useradd --uid 1000 --gid 1000 --shell /bin/false --create-home appuser
+
+# Security: Install only essential runtime packages, remove caches
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /app
+
+# Copy virtual environment from builder
+COPY --from=builder --chown=appuser:appgroup /app/.venv /app/.venv
+
+# Copy application code
+COPY --from=builder --chown=appuser:appgroup /app /app
+
+# Set environment
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONFAULTHANDLER=1
+
+# Security: Switch to non-root user
+USER appuser
+
+# Health check (customize endpoint as needed)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+# Expose port (documentation)
+EXPOSE 8000
+
+# Use tini as init system for proper signal handling
+ENTRYPOINT ["tini", "--"]
+
+# Default command (override in docker-compose or at runtime)
+CMD ["python", "-m", "app.main"]
+
+# =============================================================================
+# OCI Labels (customize these)
+# =============================================================================
+LABEL org.opencontainers.image.title="My Python App" \
+      org.opencontainers.image.description="Python application with UV" \
+      org.opencontainers.image.version="1.0.0" \
+      org.opencontainers.image.vendor="Your Organization" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/your-org/your-repo"
