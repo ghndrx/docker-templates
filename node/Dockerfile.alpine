@@ -1,0 +1,78 @@
+# syntax=docker/dockerfile:1.7
+#
+# Node.js Alpine Dockerfile (Minimal Size)
+# Features: ~50MB base image, fast startup, pnpm package manager
+#
+# Note: Alpine uses musl libc - most npm packages work fine,
+#       but some native modules may need recompilation.
+#
+# Usage:
+#   docker build -f Dockerfile.alpine -t myapp:latest .
+#   docker run --rm -p 3000:3000 myapp:latest
+
+# =============================================================================
+# Stage 1: Install dependencies
+# =============================================================================
+ARG NODE_VERSION=22
+
+FROM node:${NODE_VERSION}-alpine AS deps
+
+# Enable pnpm via corepack
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Copy dependency files
+COPY package.json pnpm-lock.yaml* ./
+
+# Install production dependencies
+RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
+    pnpm fetch --frozen-lockfile && \
+    pnpm install --frozen-lockfile --prod
+
+# =============================================================================
+# Stage 2: Build application
+# =============================================================================
+FROM node:${NODE_VERSION}-alpine AS builder
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json pnpm-lock.yaml* ./
+
+# Install all deps for build
+RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+
+COPY . .
+RUN pnpm build
+RUN pnpm prune --prod
+
+# =============================================================================
+# Stage 3: Alpine runtime
+# =============================================================================
+FROM node:${NODE_VERSION}-alpine AS runtime
+
+# Security: Add non-root user (Alpine style)
+RUN addgroup -g 1000 appgroup && \
+    adduser -u 1000 -G appgroup -s /bin/sh -D appuser
+
+WORKDIR /app
+
+# Copy application
+COPY --from=builder --chown=appuser:appgroup /app/node_modules ./node_modules
+COPY --from=builder --chown=appuser:appgroup /app/dist ./dist
+COPY --from=builder --chown=appuser:appgroup /app/package.json ./
+
+ENV NODE_ENV=production
+
+USER appuser
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD node -e "fetch('http://localhost:3000/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"
+
+CMD ["node", "dist/index.js"]

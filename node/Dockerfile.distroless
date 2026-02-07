@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1.7
+#
+# Node.js Distroless Dockerfile (Maximum Security)
+# Features: No shell, no package manager, minimal attack surface
+#
+# Note: Distroless images have no shell - debugging requires ephemeral containers
+#
+# Usage:
+#   docker build -f Dockerfile.distroless -t myapp:latest .
+#   docker run --rm -p 3000:3000 myapp:latest
+
+# =============================================================================
+# Stage 1: Build environment
+# =============================================================================
+ARG NODE_VERSION=22
+
+FROM node:${NODE_VERSION}-slim AS builder
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Copy dependency files
+COPY package.json pnpm-lock.yaml* ./
+
+# Fetch and install dependencies
+RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
+    pnpm fetch --frozen-lockfile && \
+    pnpm install --frozen-lockfile
+
+# Copy source and build
+COPY . .
+RUN pnpm build
+
+# Prune to production only
+RUN pnpm prune --prod
+
+# =============================================================================
+# Stage 2: Distroless runtime (maximum security)
+# =============================================================================
+FROM gcr.io/distroless/nodejs22-debian12:nonroot AS runtime
+
+WORKDIR /app
+
+# Copy production dependencies
+COPY --from=builder /app/node_modules ./node_modules
+
+# Copy built application
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package.json ./
+
+# Environment
+ENV NODE_ENV=production
+
+# Expose port
+EXPOSE 3000
+
+# Start application (exec form required - no shell in distroless)
+CMD ["dist/index.js"]
