@@ -1,0 +1,133 @@
+# Hardened Docker Compose Template
+# Security best practices for production deployments
+# Reference: OWASP Docker Security Cheat Sheet, CIS Docker Benchmark
+#
+# Usage: Copy and customize for your application
+# Test: docker compose -f docker-compose.hardened.yml config --quiet
+
+services:
+  app:
+    image: myapp:latest
+    
+    # ──────────────────────────────────────────────────────────────
+    # USER: Never run as root
+    # ──────────────────────────────────────────────────────────────
+    # Use numeric UID/GID for Kubernetes compatibility
+    # Ensure your Dockerfile creates this user
+    user: "1000:1000"
+    
+    # ──────────────────────────────────────────────────────────────
+    # FILESYSTEM: Immutable container
+    # ──────────────────────────────────────────────────────────────
+    read_only: true
+    
+    # Provide writable tmpfs for runtime needs (cleared on restart)
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /var/run:rw,noexec,nosuid,size=32m
+    
+    # ──────────────────────────────────────────────────────────────
+    # CAPABILITIES: Principle of least privilege
+    # ──────────────────────────────────────────────────────────────
+    cap_drop:
+      - ALL
+    # Add back only what's needed (examples):
+    # cap_add:
+    #   - NET_BIND_SERVICE  # Bind to ports < 1024
+    #   - CHOWN             # Change file ownership
+    #   - SETGID            # Set group ID
+    #   - SETUID            # Set user ID
+    
+    # ──────────────────────────────────────────────────────────────
+    # SECURITY OPTIONS: Defense in depth
+    # ──────────────────────────────────────────────────────────────
+    security_opt:
+      - no-new-privileges:true    # Prevent privilege escalation
+      # - seccomp:./seccomp.json  # Custom seccomp profile
+      # - apparmor:docker-default # AppArmor profile (Linux)
+    
+    # ──────────────────────────────────────────────────────────────
+    # RESOURCE LIMITS: Prevent DoS and resource exhaustion
+    # ──────────────────────────────────────────────────────────────
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 100           # Limit process count (fork bomb protection)
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    
+    # Alternative for older Docker Compose (v2 syntax):
+    # mem_limit: 512m
+    # cpus: 1.0
+    # pids_limit: 100
+    
+    # ──────────────────────────────────────────────────────────────
+    # NETWORK: Isolation and minimal exposure
+    # ──────────────────────────────────────────────────────────────
+    networks:
+      - internal
+    # Only expose ports when necessary
+    # ports:
+    #   - "127.0.0.1:8080:8080"  # Bind to localhost only
+    
+    # ──────────────────────────────────────────────────────────────
+    # ENVIRONMENT: Secrets management
+    # ──────────────────────────────────────────────────────────────
+    # NEVER put secrets in environment or compose file
+    # Use Docker secrets, external secret managers, or env_file
+    # secrets:
+    #   - db_password
+    # environment:
+    #   - DB_HOST=db
+    
+    # ──────────────────────────────────────────────────────────────
+    # HEALTH & RESTART: Resilience
+    # ──────────────────────────────────────────────────────────────
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # ──────────────────────────────────────────────────────────────
+    # LOGGING: Prevent disk exhaustion
+    # ──────────────────────────────────────────────────────────────
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ════════════════════════════════════════════════════════════════════
+# NETWORKS: Internal by default, explicit external access
+# ════════════════════════════════════════════════════════════════════
+networks:
+  internal:
+    driver: bridge
+    internal: true    # No outbound internet access
+  
+  # Use for services that need external access
+  # external:
+  #   driver: bridge
+
+# ════════════════════════════════════════════════════════════════════
+# SECRETS: External secret management
+# ════════════════════════════════════════════════════════════════════
+# secrets:
+#   db_password:
+#     external: true    # Managed by 'docker secret create'
+#   # Or from file (development only):
+#   # db_password:
+#   #   file: ./secrets/db_password.txt
+
+# ════════════════════════════════════════════════════════════════════
+# VOLUMES: Named volumes with proper permissions
+# ════════════════════════════════════════════════════════════════════
+# volumes:
+#   app_data:
+#     driver: local
